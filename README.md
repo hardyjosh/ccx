@@ -2,8 +2,6 @@
 
 `ccx` is a skill for [OpenClaw](https://openclaw.ai) that lets it spawn, drive, and tear down [Claude Code](https://docs.claude.com/en/docs/claude-code) child sessions on its own. Each child runs in `tmux` with `--dangerously-skip-permissions` and `--remote-control`, so it shows up in the OpenClaw UI alongside your main session immediately — no inside-pane keystrokes, no manual setup.
 
-OpenClaw is the orchestrator. The LLM driving OpenClaw is a configuration choice (Claude Code, Codex, others) and `ccx` doesn't care which one — the skill runs at the OpenClaw layer. The worker sessions `ccx` spawns are always Claude Code, because that's what `cc-mgr` wraps and what supports `--remote-control`.
-
 It ships as two pieces:
 
 - A bash CLI (`cc-mgr`) that handles the tmux + claude wiring.

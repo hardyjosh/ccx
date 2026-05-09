@@ -8,8 +8,6 @@ allowed-tools: Bash, Read
 
 Spawn, resume, list, and close named Claude Code child sessions running inside tmux. Each session is started with `--dangerously-skip-permissions` and `--remote-control <name>` so it shows up in the [OpenClaw](https://openclaw.ai) UI (or any other Remote Control client) without any inside-pane keystrokes.
 
-This skill runs at the OpenClaw layer — the underlying LLM driving OpenClaw is irrelevant; `cc-mgr` always spawns Claude Code workers because that's what supports `--remote-control`.
-
 ## Critical rules
 
 **Follow the steps literally and in order. If anything fails or is ambiguous: STOP, report exactly what went wrong (command, exit code, output), and wait for guidance. Never improvise. Never auto-pick a session to resume.**
