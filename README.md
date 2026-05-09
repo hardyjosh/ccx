@@ -1,20 +1,22 @@
 # ccx — Claude Code session manager for OpenClaw
 
-`ccx` lets the [Claude Code](https://docs.claude.com/en/docs/claude-code) agent inside your [OpenClaw](https://openclaw.ai) session spawn, drive, and tear down named worker sessions on its own. Each child runs in `tmux` with `--dangerously-skip-permissions` and `--remote-control`, so it shows up alongside your main session in the OpenClaw UI immediately — no inside-pane keystrokes, no manual setup.
+`ccx` is a skill for [OpenClaw](https://openclaw.ai) that lets it spawn, drive, and tear down [Claude Code](https://docs.claude.com/en/docs/claude-code) child sessions on its own. Each child runs in `tmux` with `--dangerously-skip-permissions` and `--remote-control`, so it shows up in the OpenClaw UI alongside your main session immediately — no inside-pane keystrokes, no manual setup.
+
+OpenClaw is the orchestrator. The LLM driving OpenClaw is a configuration choice (Claude Code, Codex, others) and `ccx` doesn't care which one — the skill runs at the OpenClaw layer. The worker sessions `ccx` spawns are always Claude Code, because that's what `cc-mgr` wraps and what supports `--remote-control`.
 
 It ships as two pieces:
 
 - A bash CLI (`cc-mgr`) that handles the tmux + claude wiring.
-- An optional Claude Code skill (`/ccx`) that lets your main agent invoke it as `/ccx new <name>`, `/ccx list`, `/ccx resume`, etc.
+- An OpenClaw skill (`/ccx`) so OpenClaw can invoke it as `/ccx new <name>`, `/ccx list`, `/ccx resume`, etc.
 
 ## What it gives you
 
-- **Spawn child agents.** Your main OpenClaw session can fork off named workers to handle long-running jobs in parallel, then check on them later via `/ccx list` / `/ccx status`.
-- **Auto-onboarding.** New sessions boot with a default first prompt that asks them to read your `AGENTS.md` / `CLAUDE.md` and reply `ready` — so they share the same context your main agent has. Override or skip per-call.
-- **Named & attachable.** Each session is a named tmux session you can `tmux attach -t <name>` from a terminal, or jump to from the OpenClaw UI.
-- **Resumable.** Pick up any past Claude session by UUID via `/ccx resume`.
+- **Spawn child agents.** OpenClaw can fork off named Claude Code workers to handle long-running jobs in parallel, then check on them later via `/ccx list` / `/ccx status`.
+- **Auto-onboarding.** New sessions boot with a default first prompt that asks them to read your `AGENTS.md` / `CLAUDE.md` and reply `ready` — so they share the same context OpenClaw has. Override or skip per-call.
+- **Named & attachable.** Each child is a named tmux session you can `tmux attach -t <name>` from a terminal, or jump to from the OpenClaw UI.
+- **Resumable.** Pick up any past Claude Code session by UUID via `/ccx resume`.
 
-> **Not using OpenClaw?** `ccx` still works — it builds on Claude Code's standard `--remote-control` flag, so [claude.ai/code](https://claude.ai/code) or any other Remote Control client will see the spawned sessions. But the orchestration loop (a main agent driving children) is what OpenClaw is built for, and it's where `ccx` earns its keep.
+> **Not using OpenClaw?** `cc-mgr` works as a standalone CLI on any machine, and the skill folder is structured as a [Claude Code skill](https://docs.claude.com/en/docs/claude-code) (`SKILL.md` with frontmatter) — so you can drop it into `~/.claude/skills/` and use `/ccx` from a Claude Code session directly. Spawned children show up in [claude.ai/code](https://claude.ai/code) or any other Remote Control client. But the orchestration loop — a platform driving Claude Code workers — is what OpenClaw is built for, and it's where `ccx` earns its keep.
 
 ## Requirements
 
