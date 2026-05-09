@@ -6,7 +6,7 @@ allowed-tools: Bash, Read
 
 # ccx — Claude Code session manager for OpenClaw
 
-Spawn, resume, list, and close named Claude Code child sessions running inside tmux. Each session is started with `--dangerously-skip-permissions` and `--remote-control <name>` so it shows up in the [OpenClaw](https://openclaw.ai) UI (or any other Remote Control client) without any inside-pane keystrokes.
+Spawn, resume, list, and close named Claude Code child sessions running inside tmux. Each session is started with `--dangerously-skip-permissions` and `--remote-control <name>` so it's reachable via Claude Code's Remote Control feature (the Claude app / [claude.ai/code](https://claude.ai/code), whichever account the local `claude` CLI is authenticated as) without any inside-pane keystrokes. The /ccx skill itself is invoked from [OpenClaw](https://openclaw.ai).
 
 ## Critical rules
 

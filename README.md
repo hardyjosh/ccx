@@ -1,6 +1,6 @@
 # ccx — Claude Code session manager for OpenClaw
 
-`ccx` is a skill for [OpenClaw](https://openclaw.ai) that lets it spawn, drive, and tear down [Claude Code](https://docs.claude.com/en/docs/claude-code) child sessions on its own. Each child runs in `tmux` with `--dangerously-skip-permissions` and `--remote-control`, so it shows up in the OpenClaw UI alongside your main session immediately — no inside-pane keystrokes, no manual setup.
+`ccx` is a skill for [OpenClaw](https://openclaw.ai) that lets it spawn, drive, and tear down [Claude Code](https://docs.claude.com/en/docs/claude-code) child sessions on its own. Each child runs in a named `tmux` session with `--dangerously-skip-permissions`, and Claude Code's `--remote-control` flag is set so you can drop into the live session from the Claude app or [claude.ai/code](https://claude.ai/code) (whichever account the local `claude` CLI is authenticated as) on any device.
 
 It ships as two pieces:
 
@@ -11,10 +11,10 @@ It ships as two pieces:
 
 - **Spawn child agents.** OpenClaw can fork off named Claude Code workers to handle long-running jobs in parallel, then check on them later via `/ccx list` / `/ccx status`.
 - **Auto-onboarding.** New sessions boot with a default first prompt that asks them to read your `AGENTS.md` / `CLAUDE.md` and reply `ready` — so they share the same context OpenClaw has. Override or skip per-call.
-- **Named & attachable.** Each child is a named tmux session you can `tmux attach -t <name>` from a terminal, or jump to from the OpenClaw UI.
+- **Named & attachable.** Each child is a named tmux session you can `tmux attach -t <name>` from a terminal on the host, or open in the Claude app / [claude.ai/code](https://claude.ai/code) via Remote Control.
 - **Resumable.** Pick up any past Claude Code session by UUID via `/ccx resume`.
 
-> **Not using OpenClaw?** `cc-mgr` works as a standalone CLI on any machine, and the skill folder is structured as a [Claude Code skill](https://docs.claude.com/en/docs/claude-code) (`SKILL.md` with frontmatter) — so you can drop it into `~/.claude/skills/` and use `/ccx` from a Claude Code session directly. Spawned children show up in [claude.ai/code](https://claude.ai/code) or any other Remote Control client. But the orchestration loop — a platform driving Claude Code workers — is what OpenClaw is built for, and it's where `ccx` earns its keep.
+> **Not using OpenClaw?** `cc-mgr` works as a standalone CLI on any machine, and the skill folder is structured as a [Claude Code skill](https://docs.claude.com/en/docs/claude-code) (`SKILL.md` with frontmatter) — so you can drop it into `~/.claude/skills/` and use `/ccx` from a Claude Code session directly. Children remain reachable via Remote Control regardless. But the orchestration loop — a platform driving Claude Code workers — is what OpenClaw is built for, and it's where `ccx` earns its keep.
 
 ## Requirements
 
