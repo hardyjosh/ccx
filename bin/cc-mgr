@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+# cc-mgr — manage long-lived Claude Code sessions in tmux.
+# Each session runs with --dangerously-skip-permissions and --remote-control,
+# so it's reachable from the Remote Control UI without typing slash commands.
+#
+# Subcommands:
+#   new <name> [--cwd <dir>] [--rc <rc-name>] [--prompt <text>] [--no-prompt]
+#   resume <name> --uuid <uuid> [--cwd <dir>] [--rc <rc-name>]
+#   list-sessions [--cwd <dir>]
+#   list
+#   close <name>
+#   status <name>
+
+set -euo pipefail
+
+# Resolve the claude binary. Override with CCX_CLAUDE_BIN.
+CLAUDE_BIN="${CCX_CLAUDE_BIN:-$(command -v claude || true)}"
+if [[ -z "$CLAUDE_BIN" || ! -x "$CLAUDE_BIN" ]]; then
+  echo "ERROR: claude binary not found on PATH. Set CCX_CLAUDE_BIN or install Claude Code." >&2
+  exit 1
+fi
+NODE_BIN_DIR="$(dirname "$CLAUDE_BIN")"
+
+# Default cwd for new sessions. Override per-call with --cwd, or set CCX_DEFAULT_CWD.
+DEFAULT_CWD="${CCX_DEFAULT_CWD:-$PWD}"
+
+# Where Claude Code stores per-project session jsonl files.
+PROJECTS_DIR="${CCX_PROJECTS_DIR:-$HOME/.claude/projects}"
+
+# Default first-message for `cc-mgr new` when neither --prompt nor --no-prompt is given.
+# Override with CCX_DEFAULT_PROMPT.
+DEFAULT_NEW_PROMPT="Read AGENTS.md (or CLAUDE.md) and follow any onboarding instructions it gives. When you've finished onboarding, reply 'ready' and wait for further instructions."
+DEFAULT_NEW_PROMPT="${CCX_DEFAULT_PROMPT:-$DEFAULT_NEW_PROMPT}"
+
+usage() {
+  cat <<'EOF'
+Usage: cc-mgr <subcommand> [args]
+
+Subcommands:
+  new <name> [--cwd <dir>] [--rc <rc-name>] [--prompt <text>] [--no-prompt]
+      Spawn a fresh Claude Code session in tmux session <name>.
+      cwd defaults to $PWD (override with CCX_DEFAULT_CWD).
+      rc-name (Remote Control session name) defaults to <name>.
+      --prompt is auto-submitted as the first user message; the session
+      starts working immediately and the input box is left empty for follow-ups.
+      If neither --prompt nor --no-prompt is given, a default onboarding
+      prompt is auto-submitted that asks the agent to read AGENTS.md / CLAUDE.md.
+      Override the default with CCX_DEFAULT_PROMPT.
+      Use --no-prompt to spawn silently with no first message.
+
+  resume <name> --uuid <uuid> [--cwd <dir>] [--rc <rc-name>]
+      Resume Claude session <uuid> inside tmux session <name>.
+
+  list-sessions [--cwd <dir>]
+      Show the 10 most-recent Claude session UUIDs for <cwd>'s project dir,
+      with timestamp + first-user-message preview.
+
+  list
+      List tmux sessions and the last few lines of each pane.
+
+  close <name>
+      Kill tmux session <name>.
+
+  status <name>
+      Show the last 30 lines of tmux session <name>'s pane.
+
+Notes:
+  * Claude maps cwd -> $CCX_PROJECTS_DIR/<encoded> by replacing '/' and '.'
+    with '-'. cc-mgr uses that mapping to find resumable sessions.
+  * rc-name shows up in the Remote Control UI and the prompt-box header.
+EOF
+}
+
+encode_cwd() {
+  # Replace '/' and '.' with '-' to match Claude's project-dir naming.
+  printf '%s' "$1" | tr '/.' '-'
+}
+
+require_arg() {
+  local label="$1" val="${2-}"
+  if [[ -z "$val" ]]; then
+    echo "ERROR: $label required" >&2
+    return 2
+  fi
+}
+
+spawn_tmux() {
+  # spawn_tmux <name> <cwd> <full-claude-cmdline>
+  local name="$1" cwd="$2" cmd="$3"
+  if [[ ! -d "$cwd" ]]; then
+    echo "ERROR: cwd does not exist: $cwd" >&2
+    return 1
+  fi
+  if tmux has-session -t "$name" 2>/dev/null; then
+    echo "ERROR: tmux session '$name' already exists. Close it first." >&2
+    return 1
+  fi
+  # Export PATH inside the shell so child processes (npx, node helpers)
+  # find node, then exec the claude command.
+  tmux new-session -d -s "$name" -c "$cwd" \
+    "export PATH='$NODE_BIN_DIR:\$PATH' && $cmd"
+  sleep 1
+  if ! tmux has-session -t "$name" 2>/dev/null; then
+    echo "ERROR: tmux session '$name' failed to start" >&2
+    return 1
+  fi
+}
+
+cmd_new() {
+  local name="" cwd="$DEFAULT_CWD" rc="" prompt="" prompt_set=0 no_prompt=0
+  if [[ $# -lt 1 ]]; then echo "ERROR: name required" >&2; return 2; fi
+  name="$1"; shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cwd)       cwd="$2"; shift 2;;
+      --rc)        rc="$2"; shift 2;;
+      --prompt)    prompt="$2"; prompt_set=1; shift 2;;
+      --no-prompt) no_prompt=1; shift;;
+      *) echo "ERROR: unknown arg: $1" >&2; return 2;;
+    esac
+  done
+  rc="${rc:-$name}"
+
+  if [[ $prompt_set -eq 1 && $no_prompt -eq 1 ]]; then
+    echo "ERROR: --prompt and --no-prompt are mutually exclusive" >&2
+    return 2
+  fi
+
+  local prompt_status="no initial prompt"
+  if [[ $no_prompt -eq 0 && $prompt_set -eq 0 ]]; then
+    prompt="$DEFAULT_NEW_PROMPT"
+    prompt_set=1
+    prompt_status="default onboarding prompt sent"
+  elif [[ $prompt_set -eq 1 ]]; then
+    prompt_status="initial prompt sent"
+  fi
+
+  local cmdline
+  if [[ $prompt_set -eq 1 ]]; then
+    local q_prompt
+    printf -v q_prompt '%q' "$prompt"
+    printf -v cmdline "'%s' --dangerously-skip-permissions --remote-control '%s' %s" \
+      "$CLAUDE_BIN" "$rc" "$q_prompt"
+  else
+    printf -v cmdline "'%s' --dangerously-skip-permissions --remote-control '%s'" \
+      "$CLAUDE_BIN" "$rc"
+  fi
+  spawn_tmux "$name" "$cwd" "$cmdline"
+  echo "OK: spawned tmux session '$name' (cwd=$cwd, rc='$rc', $prompt_status)"
+  echo "   attach:  tmux attach -t $name"
+  echo "   close:   cc-mgr close $name"
+}
+
+cmd_resume() {
+  local name="" cwd="$DEFAULT_CWD" rc="" uuid=""
+  if [[ $# -lt 1 ]]; then echo "ERROR: name required" >&2; return 2; fi
+  name="$1"; shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cwd)  cwd="$2"; shift 2;;
+      --rc)   rc="$2"; shift 2;;
+      --uuid) uuid="$2"; shift 2;;
+      *) echo "ERROR: unknown arg: $1" >&2; return 2;;
+    esac
+  done
+  require_arg "--uuid" "$uuid" || return $?
+  rc="${rc:-$name}"
+
+  local proj
+  proj="$PROJECTS_DIR/$(encode_cwd "$cwd")"
+  if [[ ! -f "$proj/$uuid.jsonl" ]]; then
+    echo "ERROR: session $uuid not found at $proj/$uuid.jsonl" >&2
+    return 1
+  fi
+
+  local cmdline
+  printf -v cmdline "'%s' --resume '%s' --dangerously-skip-permissions --remote-control '%s'" \
+    "$CLAUDE_BIN" "$uuid" "$rc"
+  spawn_tmux "$name" "$cwd" "$cmdline"
+  echo "OK: resumed $uuid in tmux session '$name' (cwd=$cwd, rc='$rc')"
+}
+
+cmd_list_sessions() {
+  local cwd="$DEFAULT_CWD"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cwd) cwd="$2"; shift 2;;
+      *) echo "ERROR: unknown arg: $1" >&2; return 2;;
+    esac
+  done
+  local proj
+  proj="$PROJECTS_DIR/$(encode_cwd "$cwd")"
+  if [[ ! -d "$proj" ]]; then
+    echo "ERROR: no project dir at $proj (cwd=$cwd)" >&2
+    return 1
+  fi
+  local found=0
+  while IFS= read -r path; do
+    found=1
+    local uuid mtime preview
+    uuid=$(basename "$path" .jsonl)
+    mtime=$(date -r "$path" '+%Y-%m-%d %H:%M')
+    preview=$(grep -m1 '"role":"user"' "$path" 2>/dev/null \
+      | python3 -c '
+import sys, json
+try:
+    m = json.loads(sys.stdin.read())
+    c = m.get("message", {}).get("content", "")
+    t = c if isinstance(c, str) else " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+    print(t.replace("\n", " ")[:80])
+except Exception:
+    print("")
+' 2>/dev/null)
+    printf '%s  %s\n     %s\n' "$mtime" "$uuid" "${preview:-(no preview)}"
+  done < <(ls -1t "$proj"/*.jsonl 2>/dev/null | head -10)
+  if [[ $found -eq 0 ]]; then
+    echo "(no sessions in $proj)"
+  fi
+}
+
+cmd_list() {
+  local sessions
+  sessions=$(tmux ls -F '#S' 2>/dev/null || true)
+  if [[ -z "$sessions" ]]; then
+    echo "(no tmux sessions)"
+    return 0
+  fi
+  while IFS= read -r s; do
+    [[ -z "$s" ]] && continue
+    printf '=== %s ===\n' "$s"
+    tmux capture-pane -pt "$s" 2>/dev/null | tail -8
+    echo
+  done <<< "$sessions"
+}
+
+cmd_close() {
+  if [[ $# -lt 1 ]]; then echo "ERROR: name required" >&2; return 2; fi
+  local name="$1"
+  if ! tmux has-session -t "$name" 2>/dev/null; then
+    echo "ERROR: tmux session '$name' does not exist" >&2
+    return 1
+  fi
+  tmux kill-session -t "$name"
+  sleep 0.5
+  if tmux has-session -t "$name" 2>/dev/null; then
+    echo "ERROR: tmux session '$name' still exists after kill" >&2
+    return 1
+  fi
+  echo "OK: killed tmux session '$name'"
+}
+
+cmd_status() {
+  if [[ $# -lt 1 ]]; then echo "ERROR: name required" >&2; return 2; fi
+  local name="$1"
+  if ! tmux has-session -t "$name" 2>/dev/null; then
+    echo "ERROR: tmux session '$name' does not exist" >&2
+    return 1
+  fi
+  tmux capture-pane -pt "$name" 2>/dev/null | tail -30
+}
+
+main() {
+  if [[ $# -lt 1 ]]; then usage; exit 2; fi
+  local sub="$1"; shift
+  case "$sub" in
+    new)            cmd_new "$@";;
+    resume)         cmd_resume "$@";;
+    list-sessions)  cmd_list_sessions "$@";;
+    list)           cmd_list "$@";;
+    close)          cmd_close "$@";;
+    status)         cmd_status "$@";;
+    -h|--help|help) usage;;
+    *) echo "ERROR: unknown subcommand: $sub" >&2; usage; exit 2;;
+  esac
+}
+
+main "$@"
