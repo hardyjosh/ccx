@@ -1,18 +1,20 @@
-# ccx — Claude Code session manager (tmux + Remote Control)
+# ccx — Claude Code session manager for OpenClaw
 
-Spawn, resume, list, and close named [Claude Code](https://docs.claude.com/en/docs/claude-code) sessions inside `tmux`. Each session boots with `--dangerously-skip-permissions` and `--remote-control`, so it shows up in the Remote Control UI immediately with no inside-pane keystrokes.
+`ccx` lets the [Claude Code](https://docs.claude.com/en/docs/claude-code) agent inside your [OpenClaw](https://openclaw.ai) session spawn, drive, and tear down named worker sessions on its own. Each child runs in `tmux` with `--dangerously-skip-permissions` and `--remote-control`, so it shows up alongside your main session in the OpenClaw UI immediately — no inside-pane keystrokes, no manual setup.
 
-`ccx` is a thin wrapper around `claude` + `tmux`, plus an optional Claude Code skill (`/ccx`) that lets the orchestrating Claude session spawn and manage child sessions for you.
+It ships as two pieces:
 
-## Why
+- A bash CLI (`cc-mgr`) that handles the tmux + claude wiring.
+- An optional Claude Code skill (`/ccx`) that lets your main agent invoke it as `/ccx new <name>`, `/ccx list`, `/ccx resume`, etc.
 
-Long-running Claude tasks benefit from being detached:
+## What it gives you
 
-- They survive your terminal closing.
-- You can drive them from the Remote Control web UI on another device.
-- A "main" Claude session can spawn child sessions for parallel work and monitor them via `ccx list` / `ccx status`.
+- **Spawn child agents.** Your main OpenClaw session can fork off named workers to handle long-running jobs in parallel, then check on them later via `/ccx list` / `/ccx status`.
+- **Auto-onboarding.** New sessions boot with a default first prompt that asks them to read your `AGENTS.md` / `CLAUDE.md` and reply `ready` — so they share the same context your main agent has. Override or skip per-call.
+- **Named & attachable.** Each session is a named tmux session you can `tmux attach -t <name>` from a terminal, or jump to from the OpenClaw UI.
+- **Resumable.** Pick up any past Claude session by UUID via `/ccx resume`.
 
-`ccx` makes that ergonomic.
+> **Not using OpenClaw?** `ccx` still works — it builds on Claude Code's standard `--remote-control` flag, so [claude.ai/code](https://claude.ai/code) or any other Remote Control client will see the spawned sessions. But the orchestration loop (a main agent driving children) is what OpenClaw is built for, and it's where `ccx` earns its keep.
 
 ## Requirements
 
