@@ -6,6 +6,7 @@
 # Subcommands:
 #   new <name> [--cwd <dir>] [--rc <rc-name>] [--prompt <text>] [--no-prompt]
 #   resume <name> --uuid <uuid> [--cwd <dir>] [--rc <rc-name>]
+#   reconnect <name> [--cwd <dir>] [--uuid <uuid>]
 #   list-sessions [--cwd <dir>]
 #   list
 #   close <name>
@@ -50,6 +51,17 @@ Subcommands:
 
   resume <name> --uuid <uuid> [--cwd <dir>] [--rc <rc-name>]
       Resume Claude session <uuid> inside tmux session <name>.
+      If Claude shows the "Resume from summary / Resume full session as-is"
+      prompt, full-session is auto-selected — ccx never auto-compacts.
+
+  reconnect <name> [--cwd <dir>] [--uuid <uuid>]
+      Recover a session whose Remote Control link has gone half-broken
+      (the remote view stops updating even though the local CLI is fine).
+      Closes tmux session <name> and resumes the same Claude session
+      with a fresh `claude --resume` boot — which forces a clean bridge
+      that the server-side cache will repopulate.
+      cwd and uuid are looked up from the state file written at `new`
+      time. Pass either flag to override.
 
   list-sessions [--cwd <dir>]
       Show the 10 most-recent Claude session UUIDs for <cwd>'s project dir,
@@ -68,6 +80,8 @@ Notes:
   * Claude maps cwd -> $CCX_PROJECTS_DIR/<encoded> by replacing '/' and '.'
     with '-'. cc-mgr uses that mapping to find resumable sessions.
   * rc-name shows up in the Remote Control UI and the prompt-box header.
+  * State for `reconnect` is kept in $CCX_STATE_FILE
+    (default $HOME/.cache/cc-mgr/sessions.tsv).
 EOF
 }
 
@@ -76,12 +90,78 @@ encode_cwd() {
   printf '%s' "$1" | tr '/.' '-'
 }
 
+# State file: maps tmux session name -> cwd + jsonl uuid. Used by `reconnect`.
+# TSV: name<TAB>cwd<TAB>uuid (one entry per name; latest wins).
+state_file() {
+  printf '%s' "${CCX_STATE_FILE:-$HOME/.cache/cc-mgr/sessions.tsv}"
+}
+
+state_record() {
+  local name="$1" cwd="$2" uuid="$3"
+  local f
+  f=$(state_file)
+  mkdir -p "$(dirname "$f")"
+  if [[ -f "$f" ]]; then
+    grep -v "^${name}"$'\t' "$f" > "$f.tmp" 2>/dev/null || true
+    mv "$f.tmp" "$f"
+  fi
+  printf '%s\t%s\t%s\n' "$name" "$cwd" "$uuid" >> "$f"
+}
+
+state_lookup() {
+  # outputs "<cwd>\t<uuid>" if found, empty otherwise
+  local name="$1" f
+  f=$(state_file)
+  [[ -f "$f" ]] || return 0
+  awk -F'\t' -v n="$name" '$1==n {print $2"\t"$3; exit}' "$f"
+}
+
+state_remove() {
+  local name="$1" f
+  f=$(state_file)
+  [[ -f "$f" ]] || return 0
+  grep -v "^${name}"$'\t' "$f" > "$f.tmp" 2>/dev/null || true
+  mv "$f.tmp" "$f"
+}
+
+new_uuid() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen
+  else
+    python3 -c 'import uuid; print(uuid.uuid4())'
+  fi
+}
+
 require_arg() {
   local label="$1" val="${2-}"
   if [[ -z "$val" ]]; then
     echo "ERROR: $label required" >&2
     return 2
   fi
+}
+
+auto_dismiss_resume_prompt() {
+  # Claude Code shows a "Resume from summary / Resume full session as-is"
+  # menu when resuming a large jsonl. ccx always wants full continuity, so
+  # we auto-pick option 2 ("Resume full session as-is"): never compact
+  # without an explicit user request.
+  #
+  # Down and Enter are sent in separate calls with a small sleep — sending
+  # them as a single send-keys argument list races and the TUI can process
+  # Enter before Down lands, which would silently pick option 1 (the
+  # "summary" / compact path). Don't combine them.
+  local name="$1"
+  local timeout=15 elapsed=0
+  while (( elapsed < timeout )); do
+    if tmux capture-pane -pt "$name" 2>/dev/null | grep -q 'Resume from summary'; then
+      tmux send-keys -t "$name" Down
+      sleep 0.4
+      tmux send-keys -t "$name" Enter
+      return 0
+    fi
+    sleep 1
+    ((elapsed++))
+  done
 }
 
 spawn_tmux() {
@@ -135,20 +215,25 @@ cmd_new() {
     prompt_status="initial prompt sent"
   fi
 
+  local uuid
+  uuid=$(new_uuid)
+
   local cmdline
   if [[ $prompt_set -eq 1 ]]; then
     local q_prompt
     printf -v q_prompt '%q' "$prompt"
-    printf -v cmdline "'%s' --dangerously-skip-permissions --remote-control '%s' %s" \
-      "$CLAUDE_BIN" "$rc" "$q_prompt"
+    printf -v cmdline "'%s' --session-id '%s' --dangerously-skip-permissions --remote-control '%s' %s" \
+      "$CLAUDE_BIN" "$uuid" "$rc" "$q_prompt"
   else
-    printf -v cmdline "'%s' --dangerously-skip-permissions --remote-control '%s'" \
-      "$CLAUDE_BIN" "$rc"
+    printf -v cmdline "'%s' --session-id '%s' --dangerously-skip-permissions --remote-control '%s'" \
+      "$CLAUDE_BIN" "$uuid" "$rc"
   fi
   spawn_tmux "$name" "$cwd" "$cmdline"
-  echo "OK: spawned tmux session '$name' (cwd=$cwd, rc='$rc', $prompt_status)"
-  echo "   attach:  tmux attach -t $name"
-  echo "   close:   cc-mgr close $name"
+  state_record "$name" "$cwd" "$uuid"
+  echo "OK: spawned tmux session '$name' (cwd=$cwd, rc='$rc', uuid=$uuid, $prompt_status)"
+  echo "   attach:    tmux attach -t $name"
+  echo "   close:     cc-mgr close $name"
+  echo "   reconnect: cc-mgr reconnect $name"
 }
 
 cmd_resume() {
@@ -177,7 +262,51 @@ cmd_resume() {
   printf -v cmdline "'%s' --resume '%s' --dangerously-skip-permissions --remote-control '%s'" \
     "$CLAUDE_BIN" "$uuid" "$rc"
   spawn_tmux "$name" "$cwd" "$cmdline"
+  auto_dismiss_resume_prompt "$name"
+  state_record "$name" "$cwd" "$uuid"
   echo "OK: resumed $uuid in tmux session '$name' (cwd=$cwd, rc='$rc')"
+}
+
+cmd_reconnect() {
+  local name="" cwd="" uuid=""
+  if [[ $# -lt 1 ]]; then echo "ERROR: name required" >&2; return 2; fi
+  name="$1"; shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cwd)  cwd="$2"; shift 2;;
+      --uuid) uuid="$2"; shift 2;;
+      *) echo "ERROR: unknown arg: $1" >&2; return 2;;
+    esac
+  done
+
+  if ! tmux has-session -t "$name" 2>/dev/null; then
+    echo "ERROR: tmux session '$name' does not exist" >&2
+    return 1
+  fi
+
+  # Look up state if either field is missing.
+  if [[ -z "$cwd" || -z "$uuid" ]]; then
+    local entry
+    entry=$(state_lookup "$name")
+    if [[ -n "$entry" ]]; then
+      [[ -z "$cwd" ]]  && cwd=$(printf '%s' "$entry" | awk -F'\t' '{print $1}')
+      [[ -z "$uuid" ]] && uuid=$(printf '%s' "$entry" | awk -F'\t' '{print $2}')
+    fi
+  fi
+
+  if [[ -z "$cwd" || -z "$uuid" ]]; then
+    cat >&2 <<EOF
+ERROR: no state record for tmux session '$name' (state file: $(state_file)).
+Sessions spawned before state-tracking was added won't be in the file.
+Pass --cwd and --uuid explicitly. Find the uuid with:
+  cc-mgr list-sessions --cwd <cwd>
+EOF
+    return 1
+  fi
+
+  echo "reconnecting '$name' (cwd=$cwd, uuid=$uuid)"
+  cmd_close "$name" || return $?
+  cmd_resume "$name" --cwd "$cwd" --uuid "$uuid"
 }
 
 cmd_list_sessions() {
@@ -246,6 +375,7 @@ cmd_close() {
     echo "ERROR: tmux session '$name' still exists after kill" >&2
     return 1
   fi
+  state_remove "$name"
   echo "OK: killed tmux session '$name'"
 }
 
@@ -265,6 +395,7 @@ main() {
   case "$sub" in
     new)            cmd_new "$@";;
     resume)         cmd_resume "$@";;
+    reconnect)      cmd_reconnect "$@";;
     list-sessions)  cmd_list_sessions "$@";;
     list)           cmd_list "$@";;
     close)          cmd_close "$@";;
