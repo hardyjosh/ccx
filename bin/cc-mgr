@@ -82,6 +82,9 @@ Notes:
   * rc-name shows up in the Remote Control UI and the prompt-box header.
   * State for `reconnect` is kept in $CCX_STATE_FILE
     (default $HOME/.cache/cc-mgr/sessions.tsv).
+  * By default the new pane prepends the node bin dir to its inherited PATH.
+    Export CCX_PATH to set the pane's PATH verbatim instead — useful when
+    cc-mgr runs from a context with an unreliable PATH (cron, nested agents).
 EOF
 }
 
@@ -150,18 +153,24 @@ auto_dismiss_resume_prompt() {
   # them as a single send-keys argument list races and the TUI can process
   # Enter before Down lands, which would silently pick option 1 (the
   # "summary" / compact path). Don't combine them.
+  #
+  # NB: `((elapsed++))` returns exit 1 when the prior value is 0 (bash post-
+  # increment quirk), which `set -e` would treat as fatal — making this
+  # function (and its caller) exit non-zero silently *after* the tmux session
+  # is already spawned. Use `elapsed=$((elapsed+1))` and an explicit return 0.
   local name="$1"
   local timeout=15 elapsed=0
   while (( elapsed < timeout )); do
-    if tmux capture-pane -pt "$name" 2>/dev/null | grep -q 'Resume from summary'; then
-      tmux send-keys -t "$name" Down
+    if tmux capture-pane -pt "=$name:" 2>/dev/null | grep -q 'Resume from summary'; then
+      tmux send-keys -t "=$name:" Down
       sleep 0.4
-      tmux send-keys -t "$name" Enter
+      tmux send-keys -t "=$name:" Enter
       return 0
     fi
     sleep 1
-    ((elapsed++))
+    elapsed=$((elapsed + 1))
   done
+  return 0
 }
 
 spawn_tmux() {
@@ -171,16 +180,32 @@ spawn_tmux() {
     echo "ERROR: cwd does not exist: $cwd" >&2
     return 1
   fi
-  if tmux has-session -t "$name" 2>/dev/null; then
+  # `=name:` forces exact match — without it tmux prefix-matches, so e.g.
+  # `has-session -t foo` succeeds when only `foo-2` exists, and
+  # `kill-session -t foo` would kill `foo-2`. The trailing colon is also
+  # needed for capture-pane on older tmux (3.2a). `=name:` works uniformly
+  # across has-, kill-, send-keys, and capture-pane.
+  if tmux has-session -t "=$name:" 2>/dev/null; then
     echo "ERROR: tmux session '$name' already exists. Close it first." >&2
     return 1
   fi
-  # Export PATH inside the shell so child processes (npx, node helpers)
-  # find node, then exec the claude command.
+  # Give the new pane a working PATH, then exec the claude command. By default
+  # we prepend the node bin dir to the PATH the pane inherits — note the DOUBLE
+  # quotes: the inner $PATH must expand at runtime. Single quotes are a trap:
+  # they write the literal string "<nodedir>:$PATH", clobbering PATH down to
+  # just the node dir, so the spawned session has no git/coreutils/toolchain.
+  # If CCX_PATH is exported, use it verbatim instead — for when cc-mgr is
+  # invoked from a context whose own PATH is unreliable (cron, nested agents).
+  local path_cmd
+  if [[ -n "${CCX_PATH:-}" ]]; then
+    path_cmd="export PATH=$(printf '%q' "$CCX_PATH")"
+  else
+    path_cmd="export PATH=\"$NODE_BIN_DIR:\$PATH\""
+  fi
   tmux new-session -d -s "$name" -c "$cwd" \
-    "export PATH='$NODE_BIN_DIR:\$PATH' && $cmd"
+    "$path_cmd && $cmd"
   sleep 1
-  if ! tmux has-session -t "$name" 2>/dev/null; then
+  if ! tmux has-session -t "=$name:" 2>/dev/null; then
     echo "ERROR: tmux session '$name' failed to start" >&2
     return 1
   fi
@@ -279,7 +304,7 @@ cmd_reconnect() {
     esac
   done
 
-  if ! tmux has-session -t "$name" 2>/dev/null; then
+  if ! tmux has-session -t "=$name:" 2>/dev/null; then
     echo "ERROR: tmux session '$name' does not exist" >&2
     return 1
   fi
@@ -357,7 +382,7 @@ cmd_list() {
   while IFS= read -r s; do
     [[ -z "$s" ]] && continue
     printf '=== %s ===\n' "$s"
-    tmux capture-pane -pt "$s" 2>/dev/null | tail -8
+    tmux capture-pane -pt "=$s:" 2>/dev/null | tail -8
     echo
   done <<< "$sessions"
 }
@@ -365,13 +390,13 @@ cmd_list() {
 cmd_close() {
   if [[ $# -lt 1 ]]; then echo "ERROR: name required" >&2; return 2; fi
   local name="$1"
-  if ! tmux has-session -t "$name" 2>/dev/null; then
+  if ! tmux has-session -t "=$name:" 2>/dev/null; then
     echo "ERROR: tmux session '$name' does not exist" >&2
     return 1
   fi
-  tmux kill-session -t "$name"
+  tmux kill-session -t "=$name:"
   sleep 0.5
-  if tmux has-session -t "$name" 2>/dev/null; then
+  if tmux has-session -t "=$name:" 2>/dev/null; then
     echo "ERROR: tmux session '$name' still exists after kill" >&2
     return 1
   fi
@@ -382,11 +407,11 @@ cmd_close() {
 cmd_status() {
   if [[ $# -lt 1 ]]; then echo "ERROR: name required" >&2; return 2; fi
   local name="$1"
-  if ! tmux has-session -t "$name" 2>/dev/null; then
+  if ! tmux has-session -t "=$name:" 2>/dev/null; then
     echo "ERROR: tmux session '$name' does not exist" >&2
     return 1
   fi
-  tmux capture-pane -pt "$name" 2>/dev/null | tail -30
+  tmux capture-pane -pt "=$name:" 2>/dev/null | tail -30
 }
 
 main() {
