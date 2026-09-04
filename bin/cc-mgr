@@ -4,8 +4,8 @@
 # so it's reachable from the Remote Control UI without typing slash commands.
 #
 # Subcommands:
-#   new <name> [--cwd <dir>] [--rc <rc-name>] [--prompt <text>] [--no-prompt]
-#   resume <name> --uuid <uuid> [--cwd <dir>] [--rc <rc-name>]
+#   new <name> [--cwd <dir>] [--rc <rc-name>] [--model <id>] [--prompt <text>] [--no-prompt]
+#   resume <name> --uuid <uuid> [--cwd <dir>] [--rc <rc-name>] [--model <id>]
 #   reconnect <name> [--cwd <dir>] [--uuid <uuid>]
 #   list-sessions [--cwd <dir>]
 #   list
@@ -38,10 +38,12 @@ usage() {
 Usage: cc-mgr <subcommand> [args]
 
 Subcommands:
-  new <name> [--cwd <dir>] [--rc <rc-name>] [--prompt <text>] [--no-prompt]
+  new <name> [--cwd <dir>] [--rc <rc-name>] [--model <id>] [--prompt <text>] [--no-prompt]
       Spawn a fresh Claude Code session in tmux session <name>.
       cwd defaults to $PWD (override with CCX_DEFAULT_CWD).
       rc-name (Remote Control session name) defaults to <name>.
+      --model is passed straight to claude --model: an alias ('fable',
+      'opus', 'sonnet') or a full id. Omitted means the account default.
       --prompt is auto-submitted as the first user message; the session
       starts working immediately and the input box is left empty for follow-ups.
       If neither --prompt nor --no-prompt is given, a default onboarding
@@ -49,7 +51,7 @@ Subcommands:
       Override the default with CCX_DEFAULT_PROMPT.
       Use --no-prompt to spawn silently with no first message.
 
-  resume <name> --uuid <uuid> [--cwd <dir>] [--rc <rc-name>]
+  resume <name> --uuid <uuid> [--cwd <dir>] [--rc <rc-name>] [--model <id>]
       Resume Claude session <uuid> inside tmux session <name>.
       If Claude shows the "Resume from summary / Resume full session as-is"
       prompt, full-session is auto-selected — ccx never auto-compacts.
@@ -264,13 +266,14 @@ spawn_tmux() {
 }
 
 cmd_new() {
-  local name="" cwd="$DEFAULT_CWD" rc="" prompt="" prompt_set=0 no_prompt=0
+  local name="" cwd="$DEFAULT_CWD" rc="" model="" prompt="" prompt_set=0 no_prompt=0
   if [[ $# -lt 1 ]]; then echo "ERROR: name required" >&2; return 2; fi
   name="$1"; shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --cwd)       cwd="$2"; shift 2;;
       --rc)        rc="$2"; shift 2;;
+      --model)     model="$2"; shift 2;;
       --prompt)    prompt="$2"; prompt_set=1; shift 2;;
       --no-prompt) no_prompt=1; shift;;
       *) echo "ERROR: unknown arg: $1" >&2; return 2;;
@@ -295,20 +298,25 @@ cmd_new() {
   local uuid
   uuid=$(new_uuid)
 
+  # Built as a single --model flag (empty when unset) so the quoting stays in
+  # one place; the cmdline is re-parsed by the shell tmux spawns.
+  local model_flag=""
+  [[ -n "$model" ]] && printf -v model_flag " --model '%s'" "$model"
+
   local cmdline
   if [[ $prompt_set -eq 1 ]]; then
     local q_prompt
     printf -v q_prompt '%q' "$prompt"
-    printf -v cmdline "'%s' --session-id '%s' --dangerously-skip-permissions --remote-control '%s' %s" \
-      "$CLAUDE_BIN" "$uuid" "$rc" "$q_prompt"
+    printf -v cmdline "'%s' --session-id '%s' --dangerously-skip-permissions%s --remote-control '%s' %s" \
+      "$CLAUDE_BIN" "$uuid" "$model_flag" "$rc" "$q_prompt"
   else
-    printf -v cmdline "'%s' --session-id '%s' --dangerously-skip-permissions --remote-control '%s'" \
-      "$CLAUDE_BIN" "$uuid" "$rc"
+    printf -v cmdline "'%s' --session-id '%s' --dangerously-skip-permissions%s --remote-control '%s'" \
+      "$CLAUDE_BIN" "$uuid" "$model_flag" "$rc"
   fi
   spawn_tmux "$name" "$cwd" "$cmdline"
   auto_dismiss_trust_prompt "$name"
   state_record "$name" "$cwd" "$uuid"
-  echo "OK: spawned tmux session '$name' (cwd=$cwd, rc='$rc', uuid=$uuid, $prompt_status)"
+  echo "OK: spawned tmux session '$name' (cwd=$cwd, rc='$rc', uuid=$uuid, model=${model:-default}, $prompt_status)"
   echo "   attach:    tmux attach -t $name"
   echo "   close:     cc-mgr close $name"
   echo "   reconnect: cc-mgr reconnect $name"
@@ -318,14 +326,15 @@ cmd_new() {
 }
 
 cmd_resume() {
-  local name="" cwd="$DEFAULT_CWD" rc="" uuid=""
+  local name="" cwd="$DEFAULT_CWD" rc="" model="" uuid=""
   if [[ $# -lt 1 ]]; then echo "ERROR: name required" >&2; return 2; fi
   name="$1"; shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --cwd)  cwd="$2"; shift 2;;
-      --rc)   rc="$2"; shift 2;;
-      --uuid) uuid="$2"; shift 2;;
+      --cwd)   cwd="$2"; shift 2;;
+      --rc)    rc="$2"; shift 2;;
+      --model) model="$2"; shift 2;;
+      --uuid)  uuid="$2"; shift 2;;
       *) echo "ERROR: unknown arg: $1" >&2; return 2;;
     esac
   done
@@ -339,15 +348,18 @@ cmd_resume() {
     return 1
   fi
 
+  local model_flag=""
+  [[ -n "$model" ]] && printf -v model_flag " --model '%s'" "$model"
+
   local cmdline
-  printf -v cmdline "'%s' --resume '%s' --dangerously-skip-permissions --remote-control '%s'" \
-    "$CLAUDE_BIN" "$uuid" "$rc"
+  printf -v cmdline "'%s' --resume '%s' --dangerously-skip-permissions%s --remote-control '%s'" \
+    "$CLAUDE_BIN" "$uuid" "$model_flag" "$rc"
   spawn_tmux "$name" "$cwd" "$cmdline"
   # Trust gate comes first — it blocks before the resume menu can be drawn.
   auto_dismiss_trust_prompt "$name"
   auto_dismiss_resume_prompt "$name"
   state_record "$name" "$cwd" "$uuid"
-  echo "OK: resumed $uuid in tmux session '$name' (cwd=$cwd, rc='$rc')"
+  echo "OK: resumed $uuid in tmux session '$name' (cwd=$cwd, rc='$rc', model=${model:-session default})"
   local blocked=0
   verify_pane_unblocked "$name" || blocked=1
   return $blocked
