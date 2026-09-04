@@ -173,6 +173,58 @@ auto_dismiss_resume_prompt() {
   return 0
 }
 
+auto_dismiss_trust_prompt() {
+  # Claude Code >= 2.1.260 gates startup on a "Is this a project you trust?"
+  # dialog for any cwd not already flagged hasTrustDialogAccepted in
+  # ~/.claude.json. It blocks *before* --remote-control registers, so the pane
+  # sits on a menu, tmux looks perfectly healthy, and the session never appears
+  # in the Remote Control UI. `new` reported OK regardless — see the
+  # verification step in cmd_new/cmd_resume that now catches this class of bug.
+  #
+  # ccx auto-answers "Yes, I trust this folder". The gate cannot add safety
+  # here: every ccx pane is spawned with --dangerously-skip-permissions, and
+  # the caller named the cwd explicitly. Answering in the pane, rather than
+  # pre-seeding ~/.claude.json, avoids a read-modify-write race against every
+  # other running Claude process — they all rewrite that file.
+  #
+  # Same Down-then-Enter-in-separate-calls rule as auto_dismiss_resume_prompt,
+  # and it matters more here: "No, exit" is the *default* selection, so a raced
+  # Enter kills the session outright.
+  local name="$1"
+  local timeout=15 elapsed=0
+  while (( elapsed < timeout )); do
+    if tmux capture-pane -pt "=$name:" 2>/dev/null | grep -q 'Yes, I trust this folder'; then
+      tmux send-keys -t "=$name:" Down
+      sleep 0.4
+      tmux send-keys -t "=$name:" Enter
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 0
+}
+
+verify_pane_unblocked() {
+  # Catch any *other* startup gate, including ones added by future Claude Code
+  # releases that ccx has no specific handler for. Every blocking Claude Code
+  # menu draws the same "Enter to confirm" footer, so that is the tell. Without
+  # this, a new gate means a silent OK and a session that never reaches Remote
+  # Control — exactly the 2.1.260 trust-dialog failure.
+  local name="$1"
+  sleep 3
+  if tmux capture-pane -pt "=$name:" 2>/dev/null | grep -q 'Enter to confirm'; then
+    cat >&2 <<EOF
+ERROR: pane '$name' is stuck on a prompt and has not reached Remote Control.
+The tmux session exists, so do NOT re-run this command (it will fail with
+"session already exists"). Inspect and answer it with:
+  cc-mgr status $name
+EOF
+    return 1
+  fi
+  return 0
+}
+
 spawn_tmux() {
   # spawn_tmux <name> <cwd> <full-claude-cmdline>
   local name="$1" cwd="$2" cmd="$3"
@@ -254,11 +306,15 @@ cmd_new() {
       "$CLAUDE_BIN" "$uuid" "$rc"
   fi
   spawn_tmux "$name" "$cwd" "$cmdline"
+  auto_dismiss_trust_prompt "$name"
   state_record "$name" "$cwd" "$uuid"
   echo "OK: spawned tmux session '$name' (cwd=$cwd, rc='$rc', uuid=$uuid, $prompt_status)"
   echo "   attach:    tmux attach -t $name"
   echo "   close:     cc-mgr close $name"
   echo "   reconnect: cc-mgr reconnect $name"
+  local blocked=0
+  verify_pane_unblocked "$name" || blocked=1
+  return $blocked
 }
 
 cmd_resume() {
@@ -287,9 +343,14 @@ cmd_resume() {
   printf -v cmdline "'%s' --resume '%s' --dangerously-skip-permissions --remote-control '%s'" \
     "$CLAUDE_BIN" "$uuid" "$rc"
   spawn_tmux "$name" "$cwd" "$cmdline"
+  # Trust gate comes first — it blocks before the resume menu can be drawn.
+  auto_dismiss_trust_prompt "$name"
   auto_dismiss_resume_prompt "$name"
   state_record "$name" "$cwd" "$uuid"
   echo "OK: resumed $uuid in tmux session '$name' (cwd=$cwd, rc='$rc')"
+  local blocked=0
+  verify_pane_unblocked "$name" || blocked=1
+  return $blocked
 }
 
 cmd_reconnect() {
