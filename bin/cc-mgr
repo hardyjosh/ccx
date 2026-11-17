@@ -302,6 +302,8 @@ cmd_new() {
   # one place; the cmdline is re-parsed by the shell tmux spawns.
   local model_flag=""
   [[ -n "$model" ]] && printf -v model_flag " --model '%s'" "$model"
+  # On the Mac, every session gets Claude in Chrome (the Mac mini Chrome).
+  [[ "$(uname)" == Darwin ]] && model_flag+=" --chrome"
 
   local cmdline
   if [[ $prompt_set -eq 1 ]]; then
@@ -350,6 +352,8 @@ cmd_resume() {
 
   local model_flag=""
   [[ -n "$model" ]] && printf -v model_flag " --model '%s'" "$model"
+  # On the Mac, every session gets Claude in Chrome (the Mac mini Chrome).
+  [[ "$(uname)" == Darwin ]] && model_flag+=" --chrome"
 
   local cmdline
   printf -v cmdline "'%s' --resume '%s' --dangerously-skip-permissions%s --remote-control '%s'" \
